@@ -5,6 +5,8 @@
 
 import re
 from abc import ABCMeta, abstractmethod
+import itertools
+import typing
 
 from glasgow.support.bits import bits
 
@@ -263,6 +265,27 @@ class SVFParser:
         else:
             return value[:length]
 
+    def _parse_piomap_mapping(self) -> list[tuple[typing.Literal["INPUT", "OUTPUT", "INOUT"], str]]:
+        tokens: list[str] = self._parse_value(tuple)[0].split()
+        if tokens[0] not in ["INPUT", "OUTPUT", "INOUT"]:
+            self._parse_error(f"{tokens[0]} is not a valid pin direction (reverse numeric pin defintions not supported)")
+        if len(tokens) % 2 != 0:
+            self._parse_error(f"PIOMAP list must be formed of pairs, but got an odd number ({len(tokens)})")
+        # TODO like a lot more validation, uppercasing, etc
+        return list(itertools.batched(tokens, 2))
+
+    def _parse_pio_vector(self) -> list[typing.Literal["H", "L", "Z", "U", "D", "X"]]:
+        value,  = self._parse_value(tuple)
+        result = []
+        for item in value:
+            if item.isspace():
+                continue
+            if item.upper() in "HLZUDX":
+                result.append(item.upper())
+            else:
+                self._parse_error(f"")
+        return result
+
     def parse_command(self):
         self._cmd_pos = self._lexer.position
 
@@ -426,13 +449,13 @@ class SVFParser:
                                       end_state=end_state)
 
         elif command == "PIOMAP":
-            mapping, = self._parse_value(tuple)
+            mapping = self._parse_piomap_mapping()
             self._parse_keyword(";")
 
             result = self._handler.svf_piomap(mapping=mapping)
 
         elif command == "PIO":
-            vector, = self._parse_value(tuple)
+            vector = self._parse_pio_vector()
             self._parse_keyword(";")
 
             result = self._handler.svf_pio(vector=vector)

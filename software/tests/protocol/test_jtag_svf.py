@@ -341,14 +341,14 @@ class SVFParserTestCase(unittest.TestCase):
 
     def test_piomap(self):
         self.assertParses("PIOMAP (IN FOO OUT BAR);",
-                          [("svf_piomap", {"mapping": "IN FOO OUT BAR"})])
+                          [("svf_piomap", {"mapping": [("IN", "FOO"), ("OUT", "BAR")]})])
 
         self.assertErrors("PIOMAP;",
                           "expected data")
 
     def test_pio(self):
         self.assertParses("PIO (LHZX);",
-                          [("svf_pio", {"vector": "LHZX"})])
+                          [("svf_pio", {"vector": list("LHZX")})])
 
         self.assertErrors("PIO;",
                           "expected data")

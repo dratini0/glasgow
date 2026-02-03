@@ -10,7 +10,13 @@ from glasgow.support.bits import bits
 from glasgow.support.logging import dump_bin
 from glasgow.protocol.jtag_svf import SVFParser, SVFEventHandler
 from glasgow.applet import GlasgowAppletError
-from ..jtag_probe import JTAGState, JTAGProbeApplet, JTAGProbeStateTransitionError
+from ..jtag_probe import (
+    JTAGState,
+    JTAGProbeApplet,
+    JTAGProbeInterface,
+    JTAGProbeStateTransitionError,
+)
+from glasgow.applet.control.gpio import GPIOInterface
 
 
 class SVFError(GlasgowAppletError):
@@ -42,8 +48,15 @@ class SVFOperation:
 
 
 class SVFInterface(SVFEventHandler):
-    def __init__(self, interface, logger, frequency):
-        self.lower   = interface
+    def __init__(
+        self,
+        interface: JTAGProbeInterface,
+        logger,
+        frequency,
+        gpio_iface: GPIOInterface | None,
+        pio_names: list[str],
+    ):
+        self.lower = interface
         self._logger = logger
         self._level  = logging.DEBUG if self._logger.name == __name__ else logging.TRACE
 
@@ -57,6 +70,12 @@ class SVFInterface(SVFEventHandler):
 
         self._frequency = frequency
         self._base_frequency = frequency
+        self._gpio_iface = gpio_iface
+        self._pio_names = {name: index for index, name in enumerate(pio_names)}
+        self._pio_oe = 0
+        self._pio_o = 0
+        self._current_piomap: list[tuple[str, int]] = []
+        # TODO direction checking
 
     def _log(self, message, *args, level=None):
         self._logger.log(self._level if level is None else level, "SVF: " + message, *args)
@@ -256,15 +275,40 @@ class SVFInterface(SVFEventHandler):
                 f"RUNTEST exceeds maximum time: {run_count} cycles "
                 f"({run_count / self._frequency:.3f} s) > {max_time:.3f} s")
 
+        self._logger.info(f"{run_state} -> ({run_count}) -> {end_state}")
         await self._enter_state(run_state)
         await self.lower.pulse_tck(run_count)
         await self._enter_state(end_state)
 
     async def svf_piomap(self, mapping):
-        raise SVFError("the PIOMAP command is not supported")
+        if not self._gpio_iface:
+            raise SVFError("the PIOMAP command requires specifying PIO pins")
+        # TODO error checking
+        self._current_piomap = [(name, self._pio_names[name]) for _direction, name in mapping]
 
     async def svf_pio(self, vector):
-        raise SVFError("the PIO command is not supported")
+        if not self._gpio_iface:
+            raise SVFError("the PIO command requires specifying PIO pins")
+        # TODO error checking
+        new_oe, new_o = self._pio_oe, self._pio_o
+        # TODO: This ain't fast.
+        for (name, physical_index), command in zip(self._current_piomap, vector):
+            if command == "H":
+                await self._gpio_iface.output(physical_index, True)
+            elif command == "L":
+                await self._gpio_iface.output(physical_index, False)
+            elif command in "ZX":
+                await self._gpio_iface.input(physical_index)
+            elif command in "U":
+                await self._gpio_iface.input(physical_index)
+                if not await self._gpio_iface.get(physical_index):
+                    raise SVFError(f"PIO pin {name} is low, expted it to be high")
+            elif command in "D":
+                await self._gpio_iface.input(physical_index)
+                if await self._gpio_iface.get(physical_index):
+                    raise SVFError(f"PIO pin {name} is high, expted it to be low")
+            else:
+                assert False
 
 
 class JTAGSVFApplet(JTAGProbeApplet):
@@ -281,9 +325,41 @@ class JTAGSVFApplet(JTAGProbeApplet):
     If any commands requiring these features are encountered, the applet terminates itself.
     """
 
+    @classmethod
+    def add_build_arguments(cls, parser, access):
+        super().add_build_arguments(parser, access)
+        access.add_pins_argument(parser, "pio_pins", width=range(0, 33))
+
+    def build(self, args):
+        super().build(args)
+        if args.pio_pins:
+            with self.assembly.add_applet(self):
+                self.gpio_iface = GPIOInterface(self.logger, self.assembly, pins=args.pio_pins)
+        else:
+            self.gpio_iface = None
+
+    @classmethod
+    def add_setup_arguments(cls, parser):
+        super().add_setup_arguments(parser)
+        parser.add_argument(
+            "--pio-pin-names", metavar="NAMES", default=None,
+            help="optional comma separated list of PIO pin names")
+
     async def setup(self, args):
         await super().setup(args)
-        self.svf_iface = SVFInterface(self.jtag_iface, self.logger, args.frequency * 1000)
+
+        if args.pio_pin_names:
+            assert args.pio_pins
+            pio_names = args.pio_pin_names.split(",")
+            assert len(pio_names) == len(args.pio_pins)
+        elif args.pio_pins:
+            pio_names = [str(pin) for pin in args.pio_pins]
+        else:
+            pio_names = []
+
+        self.svf_iface = SVFInterface(
+            self.jtag_iface, self.logger, args.frequency * 1000, self.gpio_iface, pio_names
+        )
 
     @classmethod
     def add_run_arguments(cls, parser):
